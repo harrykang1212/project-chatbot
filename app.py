@@ -1,6 +1,8 @@
 import os
+import json
 import math
 import threading
+import datetime
 from collections import Counter
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -18,10 +20,92 @@ df_store = Counter()
 index_ready = False
 index_error = None
 
-TEXT_PATH = os.path.join(os.path.dirname(__file__), "manual_text.txt")
+TEXT_PATH      = os.path.join(os.path.dirname(__file__), "manual_text.txt")
+ANALYTICS_PATH = os.path.join(os.path.dirname(__file__), "analytics_log.json")
+
+# ── Topic categories Claude will classify questions into ──
+TOPICS = [
+    "Cleaning & maintenance",
+    "Torque specifications",
+    "Fault diagnosis",
+    "Tools & equipment",
+    "Safety procedures",
+    "Parts & components",
+    "Installation & assembly",
+    "Company information",
+    "Pricing & availability",
+    "General enquiry",
+]
 
 
-# ── TF-IDF for fast pre-filtering ─────────────────────────
+# ── Analytics helpers ──────────────────────────────────────
+def load_analytics():
+    """Load existing analytics log or return empty structure."""
+    if os.path.exists(ANALYTICS_PATH):
+        try:
+            with open(ANALYTICS_PATH, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return {"topics": {}, "total": 0, "logs": []}
+
+
+def save_analytics(data):
+    """Save analytics log to file."""
+    try:
+        with open(ANALYTICS_PATH, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Analytics save error: {e}")
+
+
+def classify_topic(question: str) -> str:
+    """Ask Claude to classify the question into a topic."""
+    try:
+        topics_list = "\n".join(f"- {t}" for t in TOPICS)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=50,
+            messages=[{
+                "role": "user",
+                "content": f"""Classify this customer question into exactly one of these topics:
+{topics_list}
+
+Question: "{question}"
+
+Reply with ONLY the topic name, nothing else."""
+            }]
+        )
+        topic = msg.content[0].text.strip()
+        # Make sure it matches one of our topics
+        for t in TOPICS:
+            if t.lower() in topic.lower() or topic.lower() in t.lower():
+                return t
+        return "General enquiry"
+    except:
+        return "General enquiry"
+
+
+def log_question(question: str, topic: str):
+    """Log question and topic to analytics file."""
+    try:
+        data = load_analytics()
+        data["total"] = data.get("total", 0) + 1
+        data["topics"][topic] = data["topics"].get(topic, 0) + 1
+        data["logs"].append({
+            "question": question[:200],
+            "topic": topic,
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        })
+        # Keep only last 500 logs to avoid file getting too big
+        if len(data["logs"]) > 500:
+            data["logs"] = data["logs"][-500:]
+        save_analytics(data)
+    except Exception as e:
+        print(f"Logging error: {e}")
+
+
+# ── TF-IDF search ──────────────────────────────────────────
 def tokenize(text):
     return text.lower().split()
 
@@ -39,7 +123,6 @@ def build_tfidf_index(chunks):
 
 
 def tfidf_search(query, k=20):
-    """Fast keyword pre-filter — returns top k chunks."""
     n = len(chunks_store)
     query_tokens = tokenize(query)
     scores = []
@@ -51,44 +134,30 @@ def tfidf_search(query, k=20):
                 score += tf[token] * idf
         scores.append((score, i))
     scores.sort(reverse=True)
-
-    # Return top k — include zero-score chunks too so semantic search
-    # can still find relevant content even if no keywords matched
-    top = [chunks_store[i] for _, i in scores[:k]]
-    return top
+    return [chunks_store[i] for _, i in scores[:k]]
 
 
 def build_index():
     global chunks_store, tfs_store, df_store, index_ready, index_error
     try:
         print("⏳ Loading text file...")
-        print(f"   Path: {TEXT_PATH}")
-        print(f"   Exists: {os.path.exists(TEXT_PATH)}")
-
         with open(TEXT_PATH, "r", encoding="utf-8") as f:
             full_text = f.read()
-
         print(f"   Loaded {len(full_text)} characters")
 
-        # Split into chunks
-        chunk_size = 1000
-        overlap = 150
-        chunks = []
-        start = 0
+        chunk_size, overlap = 1000, 150
+        chunks, start = [], 0
         while start < len(full_text):
-            end = start + chunk_size
-            chunk = full_text[start:end].strip()
+            chunk = full_text[start:start + chunk_size].strip()
             if chunk:
                 chunks.append(chunk)
-            start = end - overlap
+            start += chunk_size - overlap
 
         print(f"   Split into {len(chunks)} chunks")
-
         tfs, df = build_tfidf_index(chunks)
         chunks_store = chunks
         tfs_store = tfs
         df_store = df
-
         index_ready = True
         print(f"✅ Ready! {len(chunks)} chunks indexed.")
 
@@ -103,7 +172,6 @@ threading.Thread(target=build_index, daemon=True).start()
 
 
 def build_context(chunks, max_chars=6000):
-    """Join chunks up to max_chars."""
     parts, total = [], 0
     for t in chunks:
         t = t.strip()
@@ -121,16 +189,12 @@ def build_context(chunks, max_chars=6000):
 def run_chatbot(query: str) -> str:
     global conversation_history
 
-    # Step 1: TF-IDF pre-filter — get top 20 candidate chunks
     candidates = tfidf_search(query, k=20)
     context = build_context(candidates, max_chars=6000)
 
-    # Step 2: Claude does semantic understanding on the candidates
-    # This means even if keywords don't match, Claude can find
-    # the meaning e.g. "stationed" → "headquartered"
     system_prompt = f"""You are TurboAssist, an AI assistant for Tru-Marine — a turbocharger service and supply company.
 
-Your job is to answer customer questions using the reference text below.
+Answer customer questions using the reference text below.
 Use semantic understanding — if the customer asks "where is the company stationed"
 and the text says "headquartered in Singapore", understand they mean the same thing.
 
@@ -162,12 +226,19 @@ Reference text:
         if len(conversation_history) > 20:
             conversation_history = conversation_history[-20:]
 
+        # Log topic in background so it doesn't slow down the response
+        threading.Thread(
+            target=lambda: log_question(query, classify_topic(query)),
+            daemon=True
+        ).start()
+
         return answer
 
     except Exception as e:
         return f"Sorry, there was a problem reaching the AI. ({e})"
 
 
+# ── Flask routes ───────────────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():
     if index_error:
@@ -180,7 +251,7 @@ def health():
 @app.route("/chat", methods=["POST"])
 def chat():
     if not index_ready:
-        return jsonify({"answer": "The server is still starting up, please wait a moment and try again!"}), 200
+        return jsonify({"answer": "The server is still starting up, please wait a moment!"}), 200
     data = request.get_json(silent=True) or {}
     query = data.get("query", "").strip()
     if not query:
@@ -194,6 +265,13 @@ def reset():
     global conversation_history
     conversation_history = []
     return jsonify({"status": "ok", "message": "Conversation reset"})
+
+
+@app.route("/analytics", methods=["GET"])
+def analytics():
+    """Returns analytics data for the dashboard."""
+    data = load_analytics()
+    return jsonify(data)
 
 
 if __name__ == "__main__":
