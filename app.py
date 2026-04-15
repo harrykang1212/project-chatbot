@@ -267,11 +267,19 @@ def reset():
     return jsonify({"status": "ok", "message": "Conversation reset"})
 
 
+@app.route("/analytics/reset", methods=["POST"])
+def reset_analytics():
+    empty = {"topics": {}, "total": 0, "logs": []}
+    save_analytics(empty)
+    return jsonify({"status": "ok", "message": "Analytics reset!"})
+
+
 @app.route("/analytics", methods=["GET"])
 def analytics():
     """Returns analytics data for the dashboard."""
     data = load_analytics()
     return jsonify(data)
+
 
 
 if __name__ == "__main__":
