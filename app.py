@@ -192,51 +192,18 @@ def run_chatbot(query: str) -> str:
     candidates = tfidf_search(query, k=20)
     context = build_context(candidates, max_chars=6000)
 
-    system_prompt = f"""You are TruAssist, a representative of Tru-Marine — a turbocharger service and supply company headquartered in Singapore.
- 
-IDENTITY & TONE:
-- You ARE Tru-Marine. Always speak in first-person plural: "we", "our", "us".
-- Never say "they", "them", or refer to Tru-Marine as a third party.
-- Speak like a confident, professional Tru-Marine employee — not an external assistant.
-- Be warm, direct and solution-focused.
- 
-ANSWERING QUESTIONS:
-- Use the reference text below to answer questions. Use semantic understanding — match meaning, not just keywords.
-- If a question is about pricing, scopes of work, or assessments, explain that we tailor our responses based on actual inspection findings, and offer to assist further.
-- Never say "I don't know", "I don't have that information", "I cannot find it", or "it's not in my reference material".
-- Instead, confidently acknowledge the question and guide the customer to next steps.
-- Never mention Whatsapp or enquiry form more than once per response.
-- Keep response concise limiting to 200 words unless the question requires more details.
-- Offer Whatsapp number and enquiry form if possible.
- 
-WHEN YOU CANNOT FULLY ANSWER:
-- Respond confidently. For example: "We can certainly assist with that. To provide a precise answer, we'll need a few more details..."
-- Always offer to help gather the right information — vessel details, location, issue description, urgency.
-- Always end with contact options:
-  📞 +65 9827 3471
-  📧 turbo@trumarine.com
-  [WhatsApp us] or [Send us an enquiry] (remind the customer these options are available in the chat)
- 
-GLOBAL SUPPORT QUESTIONS:
-- If asked about support in a specific country or region, confirm that we provide global service coverage.
-- Offer to check: nearest service support, estimated response time, spare parts availability.
-- Ask for vessel details or current port location to advise accordingly.
- 
-UNCERTAIN OR COMPLEX QUESTIONS:
-- Never say we cannot help. Instead, say we will assess and advise.
-- Use confident language: "We can certainly assist", "Our team will evaluate", "Once we have these details, we can provide a clear quotation."
-- Replace any "I don't have" or "I cannot confirm" with action-oriented responses.
- 
-PRICING QUESTIONS:
-- Never give a flat price. Explain that pricing is based on actual condition and scope of work after inspection.
-- Structure the response around: inspection findings, scope of work, spare parts needed — then offer to provide a quotation once details are shared.
- 
-RESPONSE FORMAT:
-- Be concise and structured. Use bullet points where helpful.
-- End responses that need follow-up with contact details and a reminder that WhatsApp and enquiry form options are available in the chat.
-- Do not add unnecessary filler like "That's a great question" more than once per conversation.
-- Remember the full conversation history for follow-up questions.
- 
+    system_prompt = f"""You are TurboAssist, an AI assistant for Tru-Marine — a turbocharger service and supply company.
+
+Answer customer questions using the reference text below.
+Use semantic understanding — if the customer asks "where is the company stationed"
+and the text says "headquartered in Singapore", understand they mean the same thing.
+
+If the answer is genuinely not in the reference text, say you cannot find it and
+suggest they contact the sales team directly.
+
+Be concise, helpful and professional.
+Remember the conversation history for follow-up questions.
+
 Reference text:
 {context}"""
 
@@ -300,9 +267,45 @@ def reset():
     return jsonify({"status": "ok", "message": "Conversation reset"})
 
 
+@app.route("/feedback", methods=["POST"])
+def feedback():
+    """Log thumbs up/down feedback for AI responses."""
+    data = request.get_json(silent=True) or {}
+    msg_id = data.get("msg_id", "unknown")
+    vote = data.get("vote", "")
+    response_text = data.get("response", "")[:300]
+
+    if vote not in ("up", "down"):
+        return jsonify({"error": "Invalid vote"}), 400
+
+    try:
+        analytics = load_analytics()
+
+        # Init feedback section if not present
+        if "feedback" not in analytics:
+            analytics["feedback"] = {"up": 0, "down": 0, "logs": []}
+
+        analytics["feedback"][vote] = analytics["feedback"].get(vote, 0) + 1
+        analytics["feedback"]["logs"].append({
+            "msg_id": msg_id,
+            "vote": vote,
+            "response": response_text,
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        })
+
+        # Keep only last 500 feedback logs
+        if len(analytics["feedback"]["logs"]) > 500:
+            analytics["feedback"]["logs"] = analytics["feedback"]["logs"][-500:]
+
+        save_analytics(analytics)
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/analytics/reset", methods=["POST"])
 def reset_analytics():
-    empty = {"topics": {}, "total": 0, "logs": []}
+    empty = {"topics": {}, "total": 0, "logs": [], "feedback": {"up": 0, "down": 0, "logs": []}}
     save_analytics(empty)
     return jsonify({"status": "ok", "message": "Analytics reset!"})
 
