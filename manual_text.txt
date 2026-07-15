@@ -79,6 +79,8 @@ Spare parts supply
 Which turbocharger brands do you support? 
 Tru-Marine supports multiple Makers, including: 
 
+Bosch
+
 Mitsubishi (MET)  
 
 KBB Turbo 
